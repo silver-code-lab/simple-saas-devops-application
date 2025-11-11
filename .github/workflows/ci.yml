@@ -65,20 +65,19 @@ jobs:
         run: |
           docker build -t $ECR_REPO:$IMAGE_TAG .
           docker tag $ECR_REPO:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
+          docker tag $ECR_REPO:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
           docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
 
-      # 🔑 create kubeconfig dynamically using the job's AWS creds
       - name: Update kubeconfig for cluster
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "${{ env.CLUSTER_NAME }}"
 
-      # optional: apply manifests (namespace/deploy/service) once
       - name: Ensure namespace exists
         run: |
           kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
-      # update image on existing deployment (safe if not yet exists)
-      - name: Deploy to EKS
+      - name: Deploy to EKS (use :latest)
         run: |
           kubectl -n ${{ env.NAMESPACE }} set image deployment/people-api \
-            api=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG --record || true
+            api=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest --record || true
           kubectl -n ${{ env.NAMESPACE }} rollout status deployment/people-api --timeout=180s || true
