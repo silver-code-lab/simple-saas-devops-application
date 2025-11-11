@@ -3,10 +3,13 @@ on:
   push:
     branches: ["main"]
 
-# Make sure OIDC can mint a token
 permissions:
   id-token: write
   contents: read
+
+env:
+  CLUSTER_NAME: simple-saas-devops-eks
+  NAMESPACE: people
 
 jobs:
   build_and_e2e:
@@ -21,7 +24,7 @@ jobs:
           pip install -r requirements.txt
       - name: Unit tests
         run: pytest -q tests/test_unit_basic.py
-      - name: Build Docker image
+      - name: Build (local)
         run: docker build -t local:$GITHUB_SHA .
       - name: E2E up
         run: docker compose -f docker-compose.e2e.yaml up -d --build
@@ -35,7 +38,6 @@ jobs:
   publish_and_deploy:
     needs: build_and_e2e
     runs-on: ubuntu-latest
-    # Job-level permissions (just to be extra explicit)
     permissions:
       id-token: write
       contents: read
@@ -46,15 +48,6 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-
-      # Quick debug: can we get an OIDC token?
-      - name: Debug OIDC token
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const t = await core.getIDToken('sts.amazonaws.com');
-            core.setSecret(t);
-            core.info('Got OIDC token (masked).')
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -68,19 +61,24 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, push
+      - name: Build, tag, push to ECR
         run: |
           docker build -t $ECR_REPO:$IMAGE_TAG .
           docker tag $ECR_REPO:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
           docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
 
-      - name: Deploy to EKS
-        env:
-          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
-          NAMESPACE: people
+      # 🔑 create kubeconfig dynamically using the job's AWS creds
+      - name: Update kubeconfig for cluster
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "${{ env.CLUSTER_NAME }}"
+
+      # optional: apply manifests (namespace/deploy/service) once
+      - name: Ensure namespace exists
         run: |
-          echo "$KUBE_CONFIG_DATA" | base64 -d > kubeconfig
-          export KUBECONFIG=$PWD/kubeconfig
-          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n $NAMESPACE set image deployment/people-api api=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG --record || true
-          kubectl -n $NAMESPACE rollout status deployment/people-api --timeout=120s || true
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      # update image on existing deployment (safe if not yet exists)
+      - name: Deploy to EKS
+        run: |
+          kubectl -n ${{ env.NAMESPACE }} set image deployment/people-api \
+            api=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG --record || true
+          kubectl -n ${{ env.NAMESPACE }} rollout status deployment/people-api --timeout=180s || true
