@@ -3,6 +3,10 @@ on:
   push:
     branches: ["main"]
 
+permissions:
+  id-token: write     # <-- required for OIDC
+  contents: read
+
 jobs:
   build-test-package-e2e-publish-deploy:
     runs-on: ubuntu-latest
@@ -11,6 +15,7 @@ jobs:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       ECR_REPO: ${{ secrets.ECR_REPO }}
       IMAGE_TAG: ${{ github.sha }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -41,21 +46,39 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.e2e.yaml down -v
 
-      - name: Configure AWS credentials
+      # Gate AWS steps unless all required secrets exist
+      - name: Compute deploy flag
+        id: flags
+        run: |
+          if [ -n "${{ secrets.AWS_ACCOUNT_ID }}" ] && [ -n "${{ secrets.AWS_ROLE_ARN }}" ] && [ -n "${{ secrets.AWS_REGION }}" ] && [ -n "${{ secrets.ECR_REPO }}" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.flags.outputs.deploy == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Who am I (STS)
+        if: steps.flags.outputs.deploy == 'true'
+        run: aws sts get-caller-identity
+
       - name: Login to ECR
+        if: steps.flags.outputs.deploy == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push image to ECR
+        if: steps.flags.outputs.deploy == 'true'
         run: |
           docker tag $ECR_REPO:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
           docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
 
       - name: Deploy to EKS
+        if: steps.flags.outputs.deploy == 'true'
         env:
           KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
           NAMESPACE: people
